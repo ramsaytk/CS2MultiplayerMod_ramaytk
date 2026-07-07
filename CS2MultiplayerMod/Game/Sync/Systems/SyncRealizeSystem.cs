@@ -1,0 +1,72 @@
+using Game;
+
+using CS2MultiplayerMod.Game.Sync.Systems.Net;
+namespace CS2MultiplayerMod.Game.Sync.Systems
+{
+    /// <summary>
+    /// Runs remote-command realization during the ToolUpdate phase — the only point in the
+    /// frame where spawning a definition entity actually results in a built entity. A
+    /// definition created any later (e.g. at ModificationEnd, where capture lives) is dropped
+    /// at Cleanup before the next frame can consume it — the old "no error, no building" bug.
+    /// See docs/internals/frame-and-system-order.md for the full per-frame phase order.
+    /// </summary>
+    public partial class SyncRealizeSystem : GameSystemBase
+    {
+        private BuildSyncSystem _buildSync;
+        private NetSyncSystem _netSync;
+        private DeleteSyncSystem _deleteSync;
+        private NetReplaceSyncSystem _netReplaceSync;
+        private ZoneSyncSystem _zoneSync;
+        private TerrainSyncSystem _terrainSync;
+        private UpgradeSyncSystem _upgradeSync;
+        private MoveSyncSystem _moveSync;
+        private NetUpgradeSyncSystem _netUpgradeSync;
+        private AreaSyncSystem _areaSync;
+        private RouteSyncSystem _routeSync;
+        private TilePurchaseSyncSystem _tileSync;
+
+        protected override void OnCreate()
+        {
+            base.OnCreate();
+            _buildSync = World.GetOrCreateSystemManaged<BuildSyncSystem>();
+            _netSync = World.GetOrCreateSystemManaged<NetSyncSystem>();
+            _deleteSync = World.GetOrCreateSystemManaged<DeleteSyncSystem>();
+            _netReplaceSync = World.GetOrCreateSystemManaged<NetReplaceSyncSystem>();
+            _zoneSync = World.GetOrCreateSystemManaged<ZoneSyncSystem>();
+            _terrainSync = World.GetOrCreateSystemManaged<TerrainSyncSystem>();
+            _upgradeSync = World.GetOrCreateSystemManaged<UpgradeSyncSystem>();
+            _moveSync = World.GetOrCreateSystemManaged<MoveSyncSystem>();
+            _netUpgradeSync = World.GetOrCreateSystemManaged<NetUpgradeSyncSystem>();
+            _areaSync = World.GetOrCreateSystemManaged<AreaSyncSystem>();
+            _routeSync = World.GetOrCreateSystemManaged<RouteSyncSystem>();
+            _tileSync = World.GetOrCreateSystemManaged<TilePurchaseSyncSystem>();
+        }
+
+        protected override void OnUpdate()
+        {
+            // Reset the net pipeline's per-frame state (the one-preview-wipe-per-frame guard) before
+            // any feeder runs — DeleteSync/NetReplaceSync may hijack the frame before NetSync does.
+            _netSync.BeginRealizeFrame();
+            _buildSync.RealizePending();
+            // DeleteSync BEFORE NetSync: a remote bulldoze applied this frame tags its edge Deleted,
+            // and NetSync's split-target query excludes Deleted edges — so NetSync never resolves a
+            // split onto an edge that is being removed this same frame (a stale-reference crash in
+            // ApplyNetSystem). NetSync's own commit (flipping applyMode) is independent of delete order.
+            _deleteSync.RealizePending();
+            // Road-type replacements also drive NetSync's single ApplyTool commit slot, so run after
+            // DeleteSync and before NetSync's build: a delete armed this frame makes replace defer
+            // (IsCommitBusy), and an armed replace makes NetSync's build defer — only one net batch
+            // enters any one ApplyTool pass, never a build+replace of the same edge together.
+            _netReplaceSync.RealizePending();
+            _netSync.RealizePending();
+            _zoneSync.RealizePending();
+            _terrainSync.RealizePending();
+            _upgradeSync.RealizePending();
+            _moveSync.RealizePending();
+            _netUpgradeSync.RealizePending();
+            _areaSync.RealizePending();
+            _routeSync.RealizePending();
+            _tileSync.RealizePending();
+        }
+    }
+}

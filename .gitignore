@@ -1,0 +1,20 @@
+bin/
+obj/
+/packages/
+riderModule.iml
+/_ReSharper.Caches/
+
+# CS2 modding toolchain artifacts
+Library/
+*.user
+
+# UI module build artifacts
+node_modules/
+CS2MultiplayerMod/UI/build/
+
+docs/
+tools/
+.claude/
+.idea
+CLAUDE.md
+Log/

@@ -1,0 +1,284 @@
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using Game;
+using Game.Common;
+using Game.Net;
+using Game.Objects;
+using Game.Prefabs;
+using Game.Tools;
+using Unity.Entities;
+using Unity.Mathematics;
+using CS2MultiplayerMod.Core.Protocol.Messages;
+using CS2MultiplayerMod.Core.Session;
+
+using CS2MultiplayerMod.Game.Sync.Infrastructure;
+using CS2MultiplayerMod.Game.Sync.Commands;
+using CS2MultiplayerMod.Game.Sync.Systems.Net;
+namespace CS2MultiplayerMod.Game.Sync.Systems
+{
+    /// <summary>
+    /// Replicates deletions (bulldozing) in both directions — the destructive counterpart
+    /// to <see cref="BuildSyncSystem"/>/<see cref="NetSyncSystem"/>.
+    ///
+    ///   detect (ModificationEnd, while the one-frame <see cref="Deleted"/> tag is alive
+    ///   and the entity's components still readable): broadcast a delete command keyed by
+    ///   prefab name + position.
+    ///   realize (ToolUpdate, via <see cref="SyncRealizeSystem"/>): find the matching
+    ///   local entity and add <see cref="Deleted"/> — the game's modification systems then
+    ///   tear down references/sub-objects and Cleanup destroys it, exactly like a local
+    ///   bulldoze.
+    ///
+    /// The usual origin-skip + <see cref="ReplicationGuard"/> logic prevents echo loops.
+    /// Sim-triggered demolitions (abandoned buildings, growable turnover) are also
+    /// broadcast; the remote apply is a no-op when the entity is already gone, so the two
+    /// simulations converge instead of fighting.
+    /// </summary>
+    public partial class DeleteSyncSystem : GameSystemBase
+    {
+        private readonly ConcurrentQueue<SimulationCommandMessage> _incoming =
+            new ConcurrentQueue<SimulationCommandMessage>();
+        private readonly ReplicationGuard _guard = new ReplicationGuard();
+
+        // Edge deletes whose armed commit never materialised (apply window expired — see
+        // NetSyncSystem._onCommitLost). Replayed ahead of fresh arrivals next cycle.
+        private readonly List<NetDeleteCommand> _replayEdgeDeletes = new List<NetDeleteCommand>();
+
+        private PrefabSystem _prefabSystem;
+        private PrefabIndex _prefabIndex;
+        private NetSyncSystem _netSync;
+        private EntityQuery _deletedObjects;
+        private EntityQuery _deletedEdges;
+        private EntityQuery _createdEdges;
+        private EntityQuery _updatedEdges;
+        private EntityQuery _liveObjects;
+        private EntityQuery _liveEdges;
+        private CommandObserver _observer;
+
+        protected override void OnCreate()
+        {
+            base.OnCreate();
+
+            Mod.log.Info(nameof(DeleteSyncSystem) + " ready.");
+            _prefabSystem = World.GetOrCreateSystemManaged<PrefabSystem>();
+            _prefabIndex = new PrefabIndex(_prefabSystem, GetEntityQuery(ComponentType.ReadOnly<PrefabData>()));
+            // Edge deletes are committed through NetSync's ApplyTool pipeline (see RealizeEdgeDeletes).
+            _netSync = World.GetOrCreateSystemManaged<NetSyncSystem>();
+
+            // Top-level objects being deleted this frame. Temp excludes tool previews;
+            // Owner excludes sub-objects (they die with their owner on both machines).
+            _deletedObjects = GetEntityQuery(new EntityQueryDesc
+            {
+                All = new[]
+                {
+                    ComponentType.ReadOnly<Deleted>(),
+                    ComponentType.ReadOnly<PrefabRef>(),
+                    ComponentType.ReadOnly<Transform>(),
+                },
+                None = new[]
+                {
+                    ComponentType.ReadOnly<Temp>(),
+                    ComponentType.ReadOnly<Owner>(),
+                    ComponentType.ReadOnly<Edge>(),
+                },
+            });
+
+            _deletedEdges = GetEntityQuery(new EntityQueryDesc
+            {
+                All = new[]
+                {
+                    ComponentType.ReadOnly<Deleted>(),
+                    ComponentType.ReadOnly<Edge>(),
+                    ComponentType.ReadOnly<Curve>(),
+                    ComponentType.ReadOnly<PrefabRef>(),
+                },
+                None = new[]
+                {
+                    ComponentType.ReadOnly<Temp>(),
+                    ComponentType.ReadOnly<Owner>(),
+                },
+            });
+
+            // Edges freshly Created this frame — used to tell a mid-span SPLIT (the original edge is
+            // deleted and its two halves are created on its centreline) from a genuine bulldoze.
+            _createdEdges = GetEntityQuery(new EntityQueryDesc
+            {
+                All = new[]
+                {
+                    ComponentType.ReadOnly<Edge>(),
+                    ComponentType.ReadOnly<Curve>(),
+                    ComponentType.ReadOnly<Created>(),
+                    ComponentType.ReadOnly<PrefabRef>(),
+                },
+                None = new[]
+                {
+                    ComponentType.ReadOnly<Temp>(),
+                    ComponentType.ReadOnly<Owner>(),
+                    ComponentType.ReadOnly<Deleted>(),
+                },
+            });
+
+            // Pre-existing edges whose geometry CHANGED this frame (Updated but NOT freshly Created).
+            // Used to spot node-reduction side-effects: when a bulldoze frees a "false node" between
+            // two collinear same-prefab edges, the game merges them — one neighbour survives with the
+            // JOINED curve (Updated), the other is Deleted. That victim's delete is a LOCAL side
+            // effect the receiver reproduces natively, so it must never go on the wire (see
+            // CaptureDeletedEdges).
+            _updatedEdges = GetEntityQuery(new EntityQueryDesc
+            {
+                All = new[]
+                {
+                    ComponentType.ReadOnly<Updated>(),
+                    ComponentType.ReadOnly<Edge>(),
+                    ComponentType.ReadOnly<Curve>(),
+                    ComponentType.ReadOnly<PrefabRef>(),
+                },
+                None = new[]
+                {
+                    ComponentType.ReadOnly<Created>(),
+                    ComponentType.ReadOnly<Temp>(),
+                    ComponentType.ReadOnly<Deleted>(),
+                    ComponentType.ReadOnly<Owner>(),
+                },
+            });
+
+            // Lookup pools for realizing remote deletes (scan + match by prefab/position).
+            _liveObjects = GetEntityQuery(new EntityQueryDesc
+            {
+                All = new[]
+                {
+                    ComponentType.ReadOnly<PrefabRef>(),
+                    ComponentType.ReadOnly<Transform>(),
+                },
+                None = new[]
+                {
+                    ComponentType.ReadOnly<Temp>(),
+                    ComponentType.ReadOnly<Owner>(),
+                    ComponentType.ReadOnly<Deleted>(),
+                    ComponentType.ReadOnly<Edge>(),
+                },
+            });
+
+            _liveEdges = GetEntityQuery(new EntityQueryDesc
+            {
+                All = new[]
+                {
+                    ComponentType.ReadOnly<Edge>(),
+                    ComponentType.ReadOnly<Curve>(),
+                    ComponentType.ReadOnly<PrefabRef>(),
+                },
+                None = new[]
+                {
+                    ComponentType.ReadOnly<Temp>(),
+                    ComponentType.ReadOnly<Owner>(),
+                    ComponentType.ReadOnly<Deleted>(),
+                },
+            });
+
+            if (Mod.Service != null)
+            {
+                _observer = new CommandObserver(_incoming, ObjectDeleteCommand.Id, NetDeleteCommand.Id);
+                Mod.Service.Session.AddObserver(_observer);
+            }
+        }
+
+        protected override void OnDestroy()
+        {
+            if (_observer != null && Mod.Service != null)
+                Mod.Service.Session.RemoveObserver(_observer);
+            base.OnDestroy();
+        }
+
+        protected override void OnUpdate()
+        {
+            MultiplayerService service = Mod.Service;
+            if (service == null) return;
+
+            MultiplayerSession session = service.Session;
+            if (!service.GameplaySyncReady) return;
+
+            long now = service.NowMs;
+            _guard.Prune(now);
+            CaptureDeletedObjects(session, now);
+            CaptureDeletedEdges(session, now);
+        }
+
+        /// <summary>Called by <see cref="SyncRealizeSystem"/> during ToolUpdate (see there for why).</summary>
+        public void RealizePending()
+        {
+            MultiplayerService service = Mod.Service;
+            if (service == null) return;
+
+            MultiplayerSession session = service.Session;
+            if (!service.GameplaySyncReady) return;
+
+            // Drain everything first, then do one scan per category — bulldozing tends to
+            // arrive in bursts and the match scan is the expensive part.
+            //
+            // Edge deletes go through NetSync's ApplyTool commit (a real bulldoze — props, lanes,
+            // terrain and node recombination, which a raw Deleted tag skips). That pipeline handles ONE
+            // net batch at a time; while a batch is in flight (or on the frame the player's own gesture
+            // applies) we leave incoming edge deletes queued and retry next cycle. A build tool merely
+            // being out no longer defers anything — the def-frame hijack (NetSync.PrepareDefinitionFrame)
+            // makes the commit safe with any tool active, so remote bulldozes land live in build mode.
+            // Object deletes (a raw Deleted tag on a real entity) always proceed.
+            bool netBusy = _netSync == null || !_netSync.CanBuildDefinitions;
+            List<ObjectDeleteCommand> objects = null;
+            List<NetDeleteCommand> edges = null;
+            List<SimulationCommandMessage> deferredEdges = null;
+            SimulationCommandMessage message;
+            while (_incoming.TryDequeue(out message))
+            {
+                if (message.OriginPlayerId == session.LocalPlayerId) continue;
+                try
+                {
+                    if (message.CommandId == ObjectDeleteCommand.Id)
+                        (objects ?? (objects = new List<ObjectDeleteCommand>())).Add(ObjectDeleteCommand.Decode(message.Body));
+                    else if (message.CommandId == NetDeleteCommand.Id)
+                    {
+                        if (netBusy)
+                            (deferredEdges ?? (deferredEdges = new List<SimulationCommandMessage>())).Add(message);
+                        else
+                            (edges ?? (edges = new List<NetDeleteCommand>())).Add(NetDeleteCommand.Decode(message.Body));
+                    }
+                }
+                catch (System.Exception ex) { Mod.log.Warn("[MP] DeleteSync: dropping malformed command: " + ex.Message); }
+            }
+
+            // Re-queue edge deletes that arrived while the net pipeline was mid-commit (the drain loop
+            // has already emptied the queue, so re-enqueuing is safe — they run next cycle).
+            if (deferredEdges != null)
+                for (int i = 0; i < deferredEdges.Count; i++) _incoming.Enqueue(deferredEdges[i]);
+
+            // Deletes handed back by NetSync (their armed commit was wiped before it could run) replay
+            // ahead of fresh arrivals once the pipeline is idle again.
+            if (!netBusy && _replayEdgeDeletes.Count > 0)
+            {
+                if (edges == null) edges = new List<NetDeleteCommand>(_replayEdgeDeletes);
+                else edges.InsertRange(0, _replayEdgeDeletes);
+                _replayEdgeDeletes.Clear();
+            }
+
+            long now = service.NowMs;
+            if (objects != null) RealizeObjectDeletes(objects, now);
+            if (edges != null) RealizeEdgeDeletes(edges, now);
+        }
+
+
+
+
+        // Bulldoze targets rarely land on the exact same coordinate on both machines:
+        // the two cities drift (each runs its own simulation between world resyncs) and
+        // growables level up — which CHANGES their prefab. So matching has to be tolerant:
+        // pick the nearest object of the requested prefab within this radius, and, failing
+        // that, the nearest *building* at the spot (a levelled growable is the same lot
+        // with a different prefab). The radius is well below lot spacing, so "nearest"
+        // never reaches a neighbour.
+        private const float ObjectMatchRadius = 8f;
+
+
+
+        private static string DeleteKey(string prefabName, float3 position) =>
+            "del|" + ReplicationGuard.Key(prefabName, position);
+
+    }
+}
