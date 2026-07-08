@@ -38,10 +38,8 @@ namespace CS2MultiplayerMod
         }
 
         /// <summary>
-        /// True when we are NOT in a playable world. Only the host-side actions are
-        /// hidden by this — hosting streams the current city, so it needs one loaded.
-        /// Joining works from anywhere (main menu included): the world comes from the
-        /// host, not from a local save.
+        /// True when no playable world is loaded. Gates host-side actions only (hosting
+        /// streams the current city); joining works from anywhere, so it stays unaffected.
         /// </summary>
         public bool IsNotInGame()
         {
@@ -83,18 +81,17 @@ namespace CS2MultiplayerMod
         public string PlayerName { get; set; } = "Player";
 
         /// <summary>
-        /// Off: log only the important things (connect/disconnect, world transfer,
-        /// faults). On: also log the chatty per-action and diagnostic lines — turn this
-        /// on when you want detailed logs to share while getting help. See <see cref="Mod.Verbose"/>.
+        /// Off: only the important lines (connect/disconnect, world transfer, faults).
+        /// On: also the per-action sync notices and periodic diagnostics. See <see cref="Mod.Verbose"/>.
         /// </summary>
         [SettingsUISection(GeneralTab, GeneralGroup)]
         public bool VerboseLogging { get; set; } = false;
 
         /// <summary>
-        /// Dev diagnostic for the net (road/path/power/pipe) sync pipeline: traces every host
-        /// placement, the command sent, what the peer receives, and every realize classification +
-        /// commit/drain step. High-volume — OFF by default (release/beta builds stay quiet); turn it
-        /// on only when capturing a detailed net-sync log to share. See <see cref="Mod.NetTrace"/>.
+        /// Dev diagnostic for the net (road/path/power/pipe) sync pipeline: traces each placement,
+        /// what is sent/received, and every realize + commit step. High-volume, and its own toggle
+        /// (separate from <see cref="VerboseLogging"/>) — OFF by default; turn it on only to capture
+        /// a net-sync log to share. See <see cref="Mod.NetTrace"/>.
         /// </summary>
         [SettingsUISection(GeneralTab, GeneralGroup)]
         public bool NetTraceLogging { get; set; } = false;
@@ -193,10 +190,9 @@ namespace CS2MultiplayerMod
         }
 
         /// <summary>
-        /// Push the host's world to all clients now (the manual drift safety-net, same as the
-        /// in-game hub's "Sync World"). Lives here too so it stays reachable when the hub's UI
-        /// module cannot load (e.g. another mod's broken .mjs aborts the UI-module load chain).
-        /// Host-only.
+        /// Push the host's world to all clients now — the manual drift safety-net, same as the
+        /// in-game hub's "Sync World". Duplicated here so it stays reachable if the hub's UI
+        /// module fails to load. Host-only.
         /// </summary>
         [SettingsUIButton]
         [SettingsUIHideByCondition(typeof(Setting), nameof(IsNotHosting))]

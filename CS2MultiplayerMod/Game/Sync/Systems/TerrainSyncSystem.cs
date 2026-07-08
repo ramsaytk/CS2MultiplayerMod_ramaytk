@@ -28,7 +28,7 @@ namespace CS2MultiplayerMod.Game.Sync.Systems
     /// accumulate, and the periodic world resync (15 min) trues everything up.
     /// NEEDS IN-GAME VERIFICATION: whether terraform brushes appear in this query (and
     /// realize through it) is unconfirmed — the 5 s diagnostic line shows captured stroke
-    /// counts. See docs/internals/terraform-brush-pipeline.md.
+    /// counts.
     /// </summary>
     public partial class TerrainSyncSystem : GameSystemBase
     {

@@ -8,7 +8,6 @@ namespace CS2MultiplayerMod.Game.Sync.Systems
     /// frame where spawning a definition entity actually results in a built entity. A
     /// definition created any later (e.g. at ModificationEnd, where capture lives) is dropped
     /// at Cleanup before the next frame can consume it — the old "no error, no building" bug.
-    /// See docs/internals/frame-and-system-order.md for the full per-frame phase order.
     /// </summary>
     public partial class SyncRealizeSystem : GameSystemBase
     {

@@ -29,13 +29,13 @@ namespace CS2MultiplayerMod
         /// <summary>
         /// Dense, per-event tracing for the net (road/path/power/pipe) sync pipeline — host placement,
         /// what is sent, what the peer receives, every realize classification + commit/drain transition.
-        /// Deliberately high-volume and OFF by default (<see cref="Setting.NetTraceLogging"/>) so release
-        /// and beta builds stay quiet; enable the toggle (or general <see cref="Setting.VerboseLogging"/>)
-        /// to capture the full picture when diagnosing a net-sync problem.
+        /// Deliberately high-volume and its own opt-in (<see cref="Setting.NetTraceLogging"/>), separate
+        /// from general <see cref="Setting.VerboseLogging"/> so that turning on verbose logging does not
+        /// also unleash this firehose. Enable it only when diagnosing a net-sync problem.
         /// </summary>
         public static void NetTrace(string message)
         {
-            if (Setting != null && (Setting.NetTraceLogging || Setting.VerboseLogging)) log.Info("[NetTrace] " + message);
+            if (Setting != null && Setting.NetTraceLogging) log.Info("[NetTrace] " + message);
         }
 
         /// <summary>

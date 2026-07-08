@@ -9,18 +9,11 @@ namespace CS2MultiplayerMod.Localization
 {
     /// <summary>
     /// One language's locale, loaded from an embedded <c>locales/&lt;lang&gt;.properties</c>
-    /// file (flat <c>key = value</c>, see the files for the format). Registered per
-    /// language in <see cref="Mod.OnLoad"/>; the game picks the source matching the
-    /// player's chosen language, so the mod follows the game language with no
-    /// mod-specific setting.
-    ///
-    /// Each language lives in exactly one file, so there is no second table to keep in
-    /// sync — the EN/DE key parity that used to be policed at runtime is now a CI check
-    /// (<c>.github/workflows/locale.yml</c>) over the two files.
-    ///
-    /// File keys starting with '@' are options-screen entries; they are resolved here
-    /// against the game's settings ID scheme so the files never hard-code the generated
-    /// IDs. Every other key is used verbatim (the <c>CS2MP.*</c> runtime keys).
+    /// file. Registered per language in <see cref="Mod.OnLoad"/>; the mod follows the game
+    /// language, with no mod-specific setting. Keys starting with '@' are options-screen
+    /// entries resolved here against the game's settings ID scheme; every other key (the
+    /// <c>CS2MP.*</c> runtime keys) is used verbatim. EN/DE key parity is a CI check
+    /// (<c>.github/workflows/locale.yml</c>), not a runtime one.
     /// </summary>
     public sealed class PropertiesLocaleSource : IDictionarySource
     {
