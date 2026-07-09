@@ -10,6 +10,7 @@ using Unity.Collections;
 using Unity.Entities;
 using Unity.Mathematics;
 using CS2MultiplayerMod.Game.Sync.Commands;
+using CS2MultiplayerMod.Game.Sync.Infrastructure;
 
 namespace CS2MultiplayerMod.Game.Sync.Systems
 {
@@ -46,7 +47,16 @@ namespace CS2MultiplayerMod.Game.Sync.Systems
 
                 for (int t = 0; t < targets.Count; t++)
                 {
+                    // The cross-prefab fallback exists for ONE case: a growable that levelled up
+                    // (same lot, new prefab name). It must never widen any other delete into a
+                    // building — that is how a stray sim-side delete near a hospital erased the
+                    // hospital on this machine and, via the echo below, on the sender's too.
+                    bool growableCmd = targets[t].prefab != Entity.Null
+                        && EntityManager.HasComponent<BuildingData>(targets[t].prefab)
+                        && EntityManager.HasComponent<SpawnableObjectData>(targets[t].prefab);
+
                     Entity best = Entity.Null;
+                    Entity bestPrefab = Entity.Null;
                     float bestDistSq = radiusSq;
                     bool bestExact = false;
 
@@ -59,22 +69,33 @@ namespace CS2MultiplayerMod.Game.Sync.Systems
                         if (d > radiusSq) continue;
 
                         bool exact = targets[t].prefab != Entity.Null && prefabs[i] == targets[t].prefab;
-                        // Only fall back to a different prefab for actual buildings, so a
-                        // bulldozed building never resolves to a nearby tree or prop.
-                        if (!exact && !EntityManager.HasComponent<Building>(e)) continue;
+                        if (!exact && !(growableCmd
+                            && EntityManager.HasComponent<Building>(e)
+                            && EntityManager.HasComponent<SpawnableObjectData>(prefabs[i]))) continue;
 
                         // Prefer an exact prefab match; within the same category prefer the nearest.
                         bool better = best == Entity.Null
                             || (exact && !bestExact)
                             || (exact == bestExact && d < bestDistSq);
-                        if (better) { best = e; bestDistSq = d; bestExact = exact; }
+                        if (better) { best = e; bestPrefab = prefabs[i]; bestDistSq = d; bestExact = exact; }
                     }
 
                     if (best != Entity.Null)
                     {
-                        // Mark before deleting so our own capture skips the echo.
-                        _guard.Mark(DeleteKey(targets[t].name, EntityManager.GetComponentData<Transform>(best).m_Position), now);
+                        // Mark with the VICTIM's prefab name — that is the key our own capture
+                        // derives from the entity next frame. Marking the command's name instead
+                        // left a cross-prefab victim unguarded, so its delete was re-broadcast
+                        // and tore down the sender's (different-named) original as well.
+                        string victimName = bestExact ? targets[t].name : _prefabSystem.GetPrefabName(bestPrefab);
+                        if (string.IsNullOrEmpty(victimName)) victimName = targets[t].name;
+                        _guard.Mark(DeleteKey(victimName, EntityManager.GetComponentData<Transform>(best).m_Position), now);
+
+                        // Read the parent before the delete: removing a roundabout island or a turn
+                        // sign only drops its effect if the parent re-selects its composition now.
+                        Entity attachParent = NetAttachment.GetNetParent(EntityManager, best);
+
                         EntityManager.AddComponent<Deleted>(best);
+                        if (attachParent != Entity.Null) NetAttachment.TagParentUpdated(EntityManager, attachParent);
                         taken.Add(best);
                         deleted++;
                     }
@@ -172,7 +193,7 @@ namespace CS2MultiplayerMod.Game.Sync.Systems
                 _netSync.ArmNetCommit(delegate
                 {
                     _replayEdgeDeletes.AddRange(armed);
-                });
+                }, "delete n=" + deleted);
             }
 
             int unmatched = 0;

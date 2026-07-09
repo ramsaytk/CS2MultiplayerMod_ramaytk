@@ -69,6 +69,12 @@ namespace CS2MultiplayerMod.Core.Session
         /// <summary>True when hosting beyond the local network (LAN filter off).</summary>
         public bool PublicExposure => Role == SessionRole.Host && _config != null && !_config.LanOnly;
 
+        /// <summary>TCP port of the active session's config (0 before the first session).</summary>
+        public int Port => _config != null ? _config.Port : 0;
+
+        /// <summary>Bytes queued in the transport but not yet on the wire (0 when idle).</summary>
+        public long PendingSendBytes => _transport != null ? _transport.PendingSendBytes : 0;
+
         /// <summary>Channel of the blob currently being received, or null. For progress UX.</summary>
         public string IncomingBlobChannel { get; private set; }
         public int IncomingBlobReceived { get; private set; }

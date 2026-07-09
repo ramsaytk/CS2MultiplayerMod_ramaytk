@@ -143,14 +143,37 @@ namespace CS2MultiplayerMod.Game
 
         // ---- Map (savegame) sync ---------------------------------------------
 
-        /// <summary>How often the host re-streams its world as a drift-correcting safety net.</summary>
+        /// <summary>Default and lower bound for the periodic world re-stream, in minutes.</summary>
+        private const int DefaultResyncMinutes = 15;
+        private const int MinResyncMinutes = 5;
+
+        private bool _warnedResyncMinutes;
+
+        /// <summary>
+        /// How often the host re-streams its world as a drift-correcting safety net.
+        ///
+        /// A world re-sync saves, streams and (on every client) reloads the whole city, so an
+        /// interval far below the default is punishing. <c>int.TryParse</c> zeroes its out
+        /// parameter on failure, so an unparseable box ("", "15m", "off") or a "0" meant to
+        /// disable the feature must not fall through to a clamp of 1 - that produced a full
+        /// save+stream+reload every single minute.
+        /// </summary>
         public long ResyncIntervalMs
         {
             get
             {
-                int minutes = 15;
-                if (Mod.Setting != null) int.TryParse(Mod.Setting.ResyncMinutes, out minutes);
-                if (minutes < 1) minutes = 1;
+                string raw = Mod.Setting != null ? (Mod.Setting.ResyncMinutes ?? "").Trim() : "";
+
+                int minutes;
+                if (!int.TryParse(raw, out minutes) || minutes <= 0) minutes = DefaultResyncMinutes;
+                else if (minutes < MinResyncMinutes) minutes = MinResyncMinutes;
+
+                if (!_warnedResyncMinutes && minutes.ToString() != raw)
+                {
+                    _warnedResyncMinutes = true;
+                    _log.Warn("[MP] World re-sync interval '" + raw + "' is not a whole number of minutes >= " +
+                              MinResyncMinutes + "; using " + minutes + " minutes instead.");
+                }
                 return (long)minutes * 60000L;
             }
         }
@@ -172,6 +195,7 @@ namespace CS2MultiplayerMod.Game
             public override void OnStatusChanged(SessionStatus status, string detail)
             {
                 _log.Info("[MP] " + status + ": " + detail);
+                Diagnostics.FlightRecorder.Note("status " + status + (string.IsNullOrEmpty(detail) ? "" : ": " + detail));
                 if (status == SessionStatus.Connected &&
                     _service._session.Role == SessionRole.Client &&
                     _service._phase == ClientWorldPhase.Connecting)
@@ -191,7 +215,24 @@ namespace CS2MultiplayerMod.Game
                 // Stop() fires Offline unconditionally (also after faults and no-op
                 // disconnects), so "closed" is only posted when a session actually ran.
                 if (status == SessionStatus.Connected && _service._session.Role == SessionRole.Host)
+                {
                     _service.AppendChatEntry(null, "Session started - players can join now.");
+                    if (_service._session.PublicExposure)
+                        _service.AppendChatEntry(null, "Friends from another network can only join if you forward TCP port " +
+                            _service._session.Port + " to this PC on your router and allow it through your firewall.");
+                    else
+                        _service.AppendChatEntry(null, "LAN-only is enabled - only players on your local network can join. " +
+                            "If they cannot connect, allow TCP port " + _service._session.Port + " through your firewall.");
+                }
+                else if (status == SessionStatus.Connected && _service._session.Role == SessionRole.Client)
+                {
+                    // Joining replaces the client's world with the host's copy. Without this notice
+                    // the swap reads as "my buildings disappeared" when both play the same city:
+                    // anything built outside the session is not in the host's world.
+                    _service.AppendChatEntry(null, "Connected - downloading the host's city. It will replace the world " +
+                        "you have open in a moment, so anything you built outside this shared session (for example just " +
+                        "before joining) is not part of it. Your own saves are untouched.");
+                }
                 else if (status == SessionStatus.Offline && _lastStatus == SessionStatus.Connected)
                 {
                     // A live session ended cleanly (we left, or the host closed it — both are normal).
@@ -210,11 +251,13 @@ namespace CS2MultiplayerMod.Game
             public override void OnPeerJoined(Peer peer)
             {
                 _log.Info("[MP] Peer joined: " + peer);
+                Diagnostics.FlightRecorder.Note("peer joined #" + peer.PlayerId);
                 // WorldResyncSystem observes joins too and pushes the live world to the newcomer.
             }
             public override void OnPeerLeft(Peer peer, string reason)
             {
                 _log.Info("[MP] Peer left: " + peer + " (" + reason + ")");
+                Diagnostics.FlightRecorder.Note("peer left #" + peer.PlayerId + " (" + reason + ")");
                 RemotePlayer removed;
                 _service._remotePlayers.TryRemove(peer.PlayerId, out removed);
             }
