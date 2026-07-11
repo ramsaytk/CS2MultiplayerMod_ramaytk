@@ -175,9 +175,8 @@ namespace CS2MultiplayerMod.Game.Sync.Systems
             int deleted = 0;
             if (matchedEdges.Count > 0)
             {
-                // Make the frame safe for our definitions while a build tool is out (wipes the
-                // player's preview for one frame — see NetSyncSystem.PrepareDefinitionFrame), then
-                // build one real bulldoze delete-definition per matched edge: the game's
+                // Reserve the default-tool definition frame, then build one real bulldoze
+                // delete-definition per matched edge: the game's
                 // ApplyNetSystem commits it, tearing down the edge's props/lanes, restoring the
                 // terrain and recombining nodes. A raw Deleted tag left "lanterns" and sunken road.
                 _netSync.PrepareDefinitionFrame();
