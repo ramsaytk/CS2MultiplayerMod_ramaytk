@@ -40,11 +40,17 @@ namespace CS2MultiplayerMod.Game.Sync.Systems
             if (any) _lastSnapshotMs = 0;
         }
 
-        private void ApplyIncoming()
+        private void ApplyIncoming(MultiplayerSession session)
         {
             StateSnapshotMessage snapshot;
             while (_incoming.TryDequeue(out snapshot))
             {
+                if (snapshot.ChannelId == WorldDigestChannelId)
+                {
+                    HandleWorldDigest(session, snapshot);
+                    continue;
+                }
+
                 IStateChannel channel;
                 if (!_channels.TryGetValue(snapshot.ChannelId, out channel)) continue;
 
@@ -68,6 +74,38 @@ namespace CS2MultiplayerMod.Game.Sync.Systems
                 Mod.Verbose("[MP] CityState: applied " + _applied + " state snapshot(s) from host in last 30s.");
                 _applied = 0;
             }
+        }
+
+        private void HandleWorldDigest(MultiplayerSession session, StateSnapshotMessage snapshot)
+        {
+            if (session == null || session.Role != SessionRole.Client || snapshot == null || snapshot.Data == null)
+                return;
+
+            if (snapshot.Data.Length < 8) return;
+
+            var reader = new NetworkReader(snapshot.Data);
+            int sequence = reader.ReadInt();
+            uint hostDigest = unchecked((uint)reader.ReadInt());
+            uint localDigest = ComputeLocalDigest(EntityManager, _channels);
+
+            if (hostDigest == localDigest)
+            {
+                _driftMismatchCount = 0;
+                return;
+            }
+
+            _driftMismatchCount++;
+            long now = _clock.ElapsedMilliseconds;
+            Mod.log.Warn("[MP] Drift guard: digest mismatch (host seq " + sequence +
+                         ", mismatch " + _driftMismatchCount + "/" + DriftMismatchesBeforeResync + ").");
+
+            if (_driftMismatchCount < DriftMismatchesBeforeResync) return;
+            if (now - _lastDriftResyncMs < DriftResyncCooldownMs) return;
+
+            _lastDriftResyncMs = now;
+            _driftMismatchCount = 0;
+            Mod.log.Warn("[MP] Drift guard: repeated mismatch; requesting world resync from host.");
+            session.RequestWorldSync();
         }
 
         /// <summary>
