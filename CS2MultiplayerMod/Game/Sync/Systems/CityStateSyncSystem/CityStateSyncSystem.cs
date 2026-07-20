@@ -19,6 +19,9 @@ namespace CS2MultiplayerMod.Game.Sync.Systems
     /// </summary>
     public partial class CityStateSyncSystem : GameSystemBase
     {
+        // Reserved channel for host world-digest heartbeats used to detect drift.
+        private const byte WorldDigestChannelId = 250;
+
         /// <summary>How often the host publishes a fresh snapshot.</summary>
         private const long SnapshotIntervalMs = 1000;
 
@@ -27,6 +30,9 @@ namespace CS2MultiplayerMod.Game.Sync.Systems
 
         /// <summary>How long a client trusts its own in-flight edit over incoming snapshots.</summary>
         private const long EditPendingTimeoutMs = 5000;
+
+        private const int DriftMismatchesBeforeResync = 3;
+        private const long DriftResyncCooldownMs = 120000;
 
         private readonly Dictionary<byte, IStateChannel> _channels = new Dictionary<byte, IStateChannel>();
         private readonly HashSet<byte> _editable = new HashSet<byte>();
@@ -44,6 +50,9 @@ namespace CS2MultiplayerMod.Game.Sync.Systems
         private long _lastEditScanMs;
         private long _lastLogMs;
         private int _applied;
+        private int _digestSequence;
+        private int _driftMismatchCount;
+        private long _lastDriftResyncMs;
 
         private struct PendingEdit
         {
@@ -120,7 +129,7 @@ namespace CS2MultiplayerMod.Game.Sync.Systems
             else
             {
                 DetectLocalEdits(session);
-                ApplyIncoming();
+                ApplyIncoming(session);
             }
         }
 
@@ -134,11 +143,26 @@ namespace CS2MultiplayerMod.Game.Sync.Systems
             _lastSnapshotMs = now;
 
             int sent = 0;
+            uint digest = 2166136261u;
             foreach (var pair in _channels)
             {
                 var writer = new NetworkWriter(64);
-                if (pair.Value.Capture(EntityManager, writer)) { session.SendState(pair.Key, writer.ToArray()); sent++; }
+                if (!pair.Value.Capture(EntityManager, writer)) continue;
+
+                byte[] payload = writer.ToArray();
+                session.SendState(pair.Key, payload);
+                sent++;
+
+                digest = DigestCombine(digest, pair.Key);
+                digest = DigestCombine(digest, payload);
             }
+
+            // Broadcast one compact hash of the host snapshot so clients can detect world drift.
+            _digestSequence++;
+            var digestWriter = new NetworkWriter(12);
+            digestWriter.WriteInt(_digestSequence);
+            digestWriter.WriteInt(unchecked((int)digest));
+            session.SendState(WorldDigestChannelId, digestWriter.ToArray());
 
             // Heartbeat every ~30 s so the log shows state replication is alive without spam.
             if (now - _lastLogMs >= 30000) { _lastLogMs = now; Mod.Verbose("[MP] CityState: broadcasting " + sent + " channel(s)/snapshot to clients."); }
@@ -200,6 +224,42 @@ namespace CS2MultiplayerMod.Game.Sync.Systems
 
             public override void OnStateReceived(StateSnapshotMessage snapshot) => SyncInbox.Push(_snapshots, snapshot);
             public override void OnStateEditReceived(StateEditMessage edit) => SyncInbox.Push(_edits, edit);
+        }
+
+        private static uint ComputeLocalDigest(EntityManager entityManager, Dictionary<byte, IStateChannel> channels)
+        {
+            uint digest = 2166136261u;
+            foreach (var pair in channels)
+            {
+                var writer = new NetworkWriter(64);
+                if (!pair.Value.Capture(entityManager, writer)) continue;
+
+                byte[] payload = writer.ToArray();
+                digest = DigestCombine(digest, pair.Key);
+                digest = DigestCombine(digest, payload);
+            }
+            return digest;
+        }
+
+        private static uint DigestCombine(uint seed, byte value)
+        {
+            unchecked
+            {
+                return (seed ^ value) * 16777619u;
+            }
+        }
+
+        private static uint DigestCombine(uint seed, byte[] bytes)
+        {
+            if (bytes == null) return seed;
+
+            unchecked
+            {
+                uint hash = seed;
+                for (int i = 0; i < bytes.Length; i++)
+                    hash = (hash ^ bytes[i]) * 16777619u;
+                return hash;
+            }
         }
     }
 }
